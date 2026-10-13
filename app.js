@@ -107,7 +107,15 @@
     state.timerStoppedSeconds = timerSeconds();
     window.clearInterval(state.timerHandle);
     state.timerHandle = null;
-    updateTimerView();
+    renderWorkout();
+  }
+  function resumeRestTimer() {
+    const elapsedSeconds = Number(state.timerStoppedSeconds || 0);
+    state.timerStartedAt = Date.now() - elapsedSeconds * 1000;
+    state.timerStoppedSeconds = null;
+    window.clearInterval(state.timerHandle);
+    state.timerHandle = window.setInterval(updateTimerView, 1000);
+    renderWorkout();
   }
   function updateTimerView() {
     const value = document.querySelector('#restTimerValue');
@@ -126,7 +134,17 @@
   }
   function timerHtml() {
     if (!state.timerStartedAt && state.timerStoppedSeconds === null) return '';
-    return `<div class="timer-card"><div><span class="muted">Відпочинок</span><strong id="restTimerValue">${formatTime(timerSeconds())}</strong></div>${state.timerHandle ? '<button type="button" data-action="stop-timer">Зупинити</button>' : '<span class="muted">Зупинено</span>'}</div>`;
+    const control = state.timerHandle
+      ? '<button type="button" data-action="stop-timer">Зупинити</button>'
+      : '<button type="button" data-action="resume-timer">Продовжити</button>';
+    return `<div class="timer-card"><div><span class="muted">Відпочинок</span><strong id="restTimerValue">${formatTime(timerSeconds())}</strong></div>${control}</div>`;
+  }
+  function scrollActiveExerciseIntoView() {
+    const chips = app.querySelector('.chips');
+    const activeChip = chips?.querySelector('.chip.active');
+    if (!chips || !activeChip) return;
+    const targetLeft = activeChip.offsetLeft - (chips.clientWidth - activeChip.offsetWidth) / 2;
+    chips.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
   }
   function renderStart(data) {
     const today = data?.today;
@@ -220,6 +238,7 @@
 
       <button type="button" class="big secondary" data-action="open-exercise-dialog">＋ Додати вправу</button>
       <button type="button" class="big danger" data-action="finish">Завершити тренування</button>`;
+    window.requestAnimationFrame(scrollActiveExerciseIntoView);
   }
 
   async function boot() {
@@ -381,6 +400,7 @@
       else if (action === 'close-app') tg?.close?.();
       else if (action === 'select-exercise') await selectExercise(button.dataset.exerciseId);
       else if (action === 'stop-timer') stopRestTimer();
+      else if (action === 'resume-timer') resumeRestTimer();
       else if (action === 'edit-set') openSetEditor(button.dataset.setId);
       else if (action === 'undo-last-set') await deleteSet(state.lastSavedSet.id);
       else if (action === 'restore-set') await restoreSet();
