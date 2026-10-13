@@ -24,6 +24,12 @@
     weight: 0,
     reps: 8,
     requestInProgress: false,
+    timerStartedAt: null,
+    timerStoppedSeconds: null,
+    timerHandle: null,
+    lastSavedSet: null,
+    deletedSet: null,
+    editingSet: null,
   };
 
   const initData = tg?.initData || '';
@@ -82,6 +88,46 @@
     return result.data;
   }
 
+  function formatTime(totalSeconds) {
+    const seconds = Math.max(0, Math.floor(totalSeconds));
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+  function timerSeconds() {
+    if (state.timerStoppedSeconds !== null) return state.timerStoppedSeconds;
+    if (!state.timerStartedAt) return 0;
+    return Math.floor((Date.now() - state.timerStartedAt) / 1000);
+  }
+  function beginRestTimer() {
+    state.timerStartedAt = Date.now();
+    state.timerStoppedSeconds = null;
+    window.clearInterval(state.timerHandle);
+    state.timerHandle = window.setInterval(updateTimerView, 1000);
+  }
+  function stopRestTimer() {
+    state.timerStoppedSeconds = timerSeconds();
+    window.clearInterval(state.timerHandle);
+    state.timerHandle = null;
+    updateTimerView();
+  }
+  function updateTimerView() {
+    const value = document.querySelector('#restTimerValue');
+    if (value) value.textContent = formatTime(timerSeconds());
+  }
+  function exerciseProgress(item) {
+    const done = Number(item.completed_sets || 0);
+    const target = Number(item.target_sets || 0);
+    const icon = item.status === 'skipped' ? '⏭' : done >= target && target > 0 ? '✅' : done > 0 ? '▶️' : '○';
+    return { done, target, icon };
+  }
+  function feedbackHtml() {
+    if (state.deletedSet) return `<div class="feedback-bar"><span>Підхід видалено</span><button type="button" data-action="restore-set">Повернути</button></div>`;
+    if (!state.lastSavedSet) return '';
+    return `<div class="feedback-card"><b>✅ Підхід записано: ${state.lastSavedSet.weight_kg ?? 0} кг × ${state.lastSavedSet.reps ?? 0}</b><div class="feedback-actions"><button type="button" data-action="undo-last-set">Скасувати</button><button type="button" data-action="edit-set" data-set-id="${state.lastSavedSet.id}">Редагувати</button></div></div>`;
+  }
+  function timerHtml() {
+    if (!state.timerStartedAt && state.timerStoppedSeconds === null) return '';
+    return `<div class="timer-card"><div><span class="muted">Відпочинок</span><strong id="restTimerValue">${formatTime(timerSeconds())}</strong></div>${state.timerHandle ? '<button type="button" data-action="stop-timer">Зупинити</button>' : '<span class="muted">Зупинено</span>'}</div>`;
+  }
   function renderStart(data) {
     const today = data?.today;
     app.innerHTML = `
@@ -115,8 +161,9 @@
     }
 
     const index = currentExerciseIndex();
-    const hasPrevious = index > 0;
-    const hasNext = index >= 0 && index < state.exercises.length - 1;
+    const hasPrevious = state.exercises.length > 1;
+    const hasNext = state.exercises.length > 1;
+    const currentProgress = exerciseProgress(state.exercises[index] || state.exercise);
 
     app.innerHTML = `
       <div class="card">
@@ -126,6 +173,7 @@
             <div class="progress">Вправа ${index + 1} із ${state.exercises.length}</div>
             <h2>${escapeHtml(state.exercise.name)}</h2>
             <div class="muted">Ціль: ${state.exercise.target_sets || 3}×${state.exercise.reps_min || ''}${state.exercise.reps_max ? `–${state.exercise.reps_max}` : ''}</div>
+            <div class="exercise-counter">Робочі підходи: ${currentProgress.done} із ${currentProgress.target}</div>
           </div>
           <button type="button" class="arrow" data-action="next-exercise" ${hasNext ? '' : 'disabled'}>›</button>
         </div>
@@ -134,7 +182,7 @@
       <div class="chips">
         ${state.exercises.map((item, itemIndex) => `
           <button type="button" class="chip ${itemIndex === index ? 'active' : ''}" data-action="select-exercise" data-exercise-id="${item.id}">
-            ${itemIndex + 1}. ${escapeHtml(item.name)}
+            ${exerciseProgress(item).icon} ${itemIndex + 1}. ${escapeHtml(item.name)} ${exerciseProgress(item).done}/${exerciseProgress(item).target}
           </button>`).join('')}
       </div>
 
@@ -158,14 +206,16 @@
       </div>
 
       <button type="button" class="big" data-action="add-set">✅ Зарахувати підхід</button>
+      ${feedbackHtml()}
+      ${timerHtml()}
 
       <div class="card">
         <h3>Підходи цієї вправи</h3>
         ${state.sets.length ? state.sets.map((set) => `
-          <div class="set">
+          <button type="button" class="set set-button" data-action="edit-set" data-set-id="${set.id}">
             <span>${set.is_warmup ? 'Розминка' : `Підхід ${set.set_no}`}</span>
             <b>${set.weight_kg ?? 0} × ${set.reps ?? 0}</b>
-          </div>`).join('') : '<p class="muted">Ще немає підходів</p>'}
+          </button>`).join('') : '<p class="muted">Ще немає підходів</p>'}
       </div>
 
       <button type="button" class="big secondary" data-action="open-exercise-dialog">＋ Додати вправу</button>
@@ -230,6 +280,9 @@
         clientActionId: createActionId(),
       });
       if (!result?.saved) throw new Error(result?.error || 'Підхід не вдалося зберегти');
+      state.lastSavedSet = { id: result.id, set_no: result.setNo, weight_kg: Number(state.weight), reps: Number(state.reps), is_warmup: false };
+      state.deletedSet = null;
+      beginRestTimer();
       tg?.HapticFeedback?.notificationOccurred?.('success');
       await loadState();
     } finally {
@@ -270,6 +323,38 @@
     await loadState();
   }
 
+  function openSetEditor(setId) {
+    const set = state.sets.find((item) => Number(item.id) === Number(setId)) || (Number(state.lastSavedSet?.id) === Number(setId) ? state.lastSavedSet : null);
+    if (!set) throw new Error('Підхід не знайдено');
+    state.editingSet = { ...set };
+    document.querySelector('#editSetWeight').value = Number(set.weight_kg || 0);
+    document.querySelector('#editSetReps').value = Number(set.reps || 0);
+    const editDialog = document.querySelector('#editSetDialog');
+    if (typeof editDialog.showModal === 'function') editDialog.showModal(); else editDialog.setAttribute('open', '');
+  }
+  function closeSetEditor() {
+    const editDialog = document.querySelector('#editSetDialog');
+    if (typeof editDialog.close === 'function') editDialog.close(); else editDialog.removeAttribute('open');
+    state.editingSet = null;
+  }
+  async function saveEditedSet() {
+    const result = await api('edit_set', { sessionId: Number(state.session.id), setId: Number(state.editingSet.id), weight: Number(document.querySelector('#editSetWeight').value), reps: Number(document.querySelector('#editSetReps').value) });
+    if (!result?.updated) throw new Error('Не вдалося оновити підхід');
+    closeSetEditor(); state.lastSavedSet = result.set; await loadState();
+  }
+  async function deleteSet(setId) {
+    const original = state.sets.find((item) => Number(item.id) === Number(setId)) || state.lastSavedSet;
+    const result = await api('delete_set', { sessionId: Number(state.session.id), setId: Number(setId) });
+    if (!result?.deleted) throw new Error('Не вдалося видалити підхід');
+    state.deletedSet = original; state.lastSavedSet = null;
+    if (Number(setId) === Number(original?.id)) stopRestTimer();
+    closeSetEditor(); await loadState();
+  }
+  async function restoreSet() {
+    const result = await api('restore_set', { sessionId: Number(state.session.id), setId: Number(state.deletedSet.id) });
+    if (!result?.restored) throw new Error('Не вдалося повернути підхід');
+    state.lastSavedSet = result.set; state.deletedSet = null; await loadState();
+  }
   async function finishWorkout() {
     const result = await api('finish', { sessionId: Number(state.session.id) });
     state.session = null;
@@ -295,12 +380,16 @@
       else if (action === 'finish') await finishWorkout();
       else if (action === 'close-app') tg?.close?.();
       else if (action === 'select-exercise') await selectExercise(button.dataset.exerciseId);
+      else if (action === 'stop-timer') stopRestTimer();
+      else if (action === 'edit-set') openSetEditor(button.dataset.setId);
+      else if (action === 'undo-last-set') await deleteSet(state.lastSavedSet.id);
+      else if (action === 'restore-set') await restoreSet();
       else if (action === 'previous-exercise') {
         const i = currentExerciseIndex();
-        if (i > 0) await selectExercise(state.exercises[i - 1].id);
+        if (state.exercises.length > 1) await selectExercise(state.exercises[(i - 1 + state.exercises.length) % state.exercises.length].id);
       } else if (action === 'next-exercise') {
         const i = currentExerciseIndex();
-        if (i >= 0 && i < state.exercises.length - 1) await selectExercise(state.exercises[i + 1].id);
+        if (state.exercises.length > 1) await selectExercise(state.exercises[(i + 1) % state.exercises.length].id);
       } else if (action === 'change-weight') {
         state.weight = Math.max(0, state.weight + Number(button.dataset.delta));
         document.querySelector('#weightValue').textContent = state.weight;
@@ -342,6 +431,16 @@
     }
   });
 
+  document.querySelector('#editSetForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.requestInProgress) return;
+    try { state.requestInProgress = true; await saveEditedSet(); } catch (error) { toast(error.message || error); } finally { state.requestInProgress = false; }
+  });
+  document.querySelector('#deleteEditedSet').addEventListener('click', async () => {
+    if (!state.editingSet || state.requestInProgress) return;
+    try { state.requestInProgress = true; await deleteSet(state.editingSet.id); } catch (error) { toast(error.message || error); } finally { state.requestInProgress = false; }
+  });
+  document.querySelector('#cancelEditSet').addEventListener('click', closeSetEditor);
   cancelExerciseButton.addEventListener('click', closeExerciseDialog);
   boot();
 })();
